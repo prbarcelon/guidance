@@ -1,41 +1,18 @@
-using System.Net.Http.Json;
+using System.ClientModel;
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
+using OpenAI;
+using OpenAI.Chat;
 using Guidance.Grammar;
 using Guidance.Models;
 
 namespace Guidance.Adapters.OpenAI;
 
-// ---------------------------------------------------------------------------
-// OpenAI wire types
-// ---------------------------------------------------------------------------
-
-internal record ChatMessage(
-    [property: JsonPropertyName("role")] string Role,
-    [property: JsonPropertyName("content")] string Content);
-
-internal record ChatRequest(
-    [property: JsonPropertyName("model")] string Model,
-    [property: JsonPropertyName("messages")] List<ChatMessage> Messages,
-    [property: JsonPropertyName("max_tokens")] int? MaxTokens = null,
-    [property: JsonPropertyName("temperature")] float? Temperature = null,
-    [property: JsonPropertyName("stop")] string[]? Stop = null,
-    [property: JsonPropertyName("response_format")] object? ResponseFormat = null);
-
-internal record ChatChoice(
-    [property: JsonPropertyName("message")] ChatMessage Message);
-
-internal record ChatCompletionResponse(
-    [property: JsonPropertyName("choices")] List<ChatChoice> Choices);
-
-// ---------------------------------------------------------------------------
-// Interpreter
-// ---------------------------------------------------------------------------
-
 /// <summary>
 /// An <see cref="IInterpreter"/> that calls the OpenAI Chat Completions API
-/// (<c>/v1/chat/completions</c>) to execute grammar rules.
+/// using the official <c>OpenAI</c> .NET SDK to execute grammar rules.
+///
+/// Supports OpenAI, Azure OpenAI, and any OpenAI API-compatible server
+/// (e.g. Ollama, LM Studio, vLLM) via the <paramref name="baseUrl"/> parameter.
 ///
 /// State management:
 /// <list type="bullet">
@@ -52,12 +29,11 @@ internal record ChatCompletionResponse(
 ///   </description></item>
 /// </list>
 ///
-/// <b>Note on blocking:</b> HTTP calls are made synchronously via
-/// <c>GetAwaiter().GetResult()</c>.  This mirrors the Python library's
-/// synchronous behaviour.  A future <c>IAsyncInterpreter</c> interface can
-/// replace this.
+/// <b>Note on blocking:</b> Completions are requested synchronously via the SDK's
+/// <c>CompleteChat</c> method.  This mirrors the Python library's synchronous
+/// behaviour.  A future <c>IAsyncInterpreter</c> interface can replace this.
 ///
-/// <b>Note on HttpClient lifecycle:</b> A single <see cref="HttpClient"/> instance
+/// <b>Note on ChatClient lifecycle:</b> A single <see cref="ChatClient"/> instance
 /// is created per public constructor call and is then <em>shared</em> by all clones
 /// of that interpreter (see the private copy constructor).  Do not create a new
 /// <see cref="OpenAIInterpreter"/> per request; instead, create it once via
@@ -68,22 +44,12 @@ internal record ChatCompletionResponse(
 /// </summary>
 public sealed class OpenAIInterpreter : IInterpreter
 {
-    // Static fields first, then instance fields.
-
-    // JSON serialiser options — shared across all instances.
-    private static readonly JsonSerializerOptions _jsonOptions = new()
-    {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    };
-
     // -----------------------------------------------------------------------
-    // The HttpClient is shared between an interpreter and all of its clones.
-    // This avoids socket exhaustion: all Model branches that descend from the
-    // same OpenAIModel.Create() call reuse a single socket pool.
+    // The ChatClient is shared between an interpreter and all of its clones.
+    // ChatClient is thread-safe; sharing it avoids the overhead of re-creating
+    // the underlying HTTP pipeline for every Model branch.
     // -----------------------------------------------------------------------
-    private readonly HttpClient _httpClient;
-    private readonly string _model;
-    private readonly string _baseUrl;
+    private readonly ChatClient _chatClient;
 
     // Accumulated chat history (completed messages).
     private readonly List<ChatMessage> _messages;
@@ -102,44 +68,51 @@ public sealed class OpenAIInterpreter : IInterpreter
     /// <summary>
     /// Initialises a new <see cref="OpenAIInterpreter"/>.
     /// </summary>
-    /// <param name="apiKey">OpenAI API key (or Azure OpenAI key).</param>
     /// <param name="model">Model name, e.g. <c>"gpt-4o"</c>.</param>
+    /// <param name="apiKey">
+    /// API key for authentication.
+    /// Pass <c>null</c> or an empty string for OpenAI API-compatible servers
+    /// that do not require a key (e.g. Ollama, LM Studio, vLLM).
+    /// </param>
     /// <param name="baseUrl">
     /// Base URL of the Chat Completions endpoint.
     /// Defaults to <c>https://api.openai.com/v1</c>.
+    /// Set this to your server's base URL to target any OpenAI API-compatible
+    /// endpoint (e.g. <c>http://localhost:11434/v1</c> for Ollama).
     /// </param>
     public OpenAIInterpreter(
-        string apiKey,
         string model,
+        string? apiKey = null,
         string baseUrl = "https://api.openai.com/v1")
     {
-        _model = model;
-        _baseUrl = baseUrl.TrimEnd('/');
+        var options = new OpenAIClientOptions
+        {
+            Endpoint = new Uri(baseUrl.TrimEnd('/'))
+        };
 
-        _httpClient = new HttpClient();
-        _httpClient.DefaultRequestHeaders.Add("Authorization", "Bearer " + apiKey);
+        // Use a placeholder for servers that do not require authentication.
+        var credential = new ApiKeyCredential(
+            string.IsNullOrWhiteSpace(apiKey) ? "no-key" : apiKey);
 
-        _messages = new List<ChatMessage>();
+        _chatClient = new ChatClient(model, credential, options);
+
+        _messages = [];
         _currentContent = new StringBuilder();
         _text = new StringBuilder();
-        _captures = new Dictionary<string, CaptureValue>();
+        _captures = [];
     }
 
     // Copy constructor used by Clone().
-    // The HttpClient is intentionally shared (it is thread-safe and reuse is recommended).
+    // ChatClient is intentionally shared (it is thread-safe and reuse is recommended).
     private OpenAIInterpreter(
-        HttpClient httpClient,
-        string model,
-        string baseUrl,
+        ChatClient chatClient,
         List<ChatMessage> messages,
         string currentContent,
         string text,
         Dictionary<string, CaptureValue> captures,
         string? activeRole)
     {
-        _httpClient = httpClient;
-        _model = model;
-        _baseUrl = baseUrl;
+        _chatClient = chatClient;
         _messages = new List<ChatMessage>(messages);
         _currentContent = new StringBuilder(currentContent);
         _text = new StringBuilder(text);
@@ -162,9 +135,7 @@ public sealed class OpenAIInterpreter : IInterpreter
 
     /// <inheritdoc/>
     public IInterpreter Clone() => new OpenAIInterpreter(
-        _httpClient,
-        _model,
-        _baseUrl,
+        _chatClient,
         _messages,
         _currentContent.ToString(),
         _text.ToString(),
@@ -229,7 +200,7 @@ public sealed class OpenAIInterpreter : IInterpreter
         // Commit the accumulated content as a completed message.
         var content = _currentContent.ToString();
         if (content.Length > 0 || role == "assistant")
-            _messages.Add(new ChatMessage(role, content));
+            _messages.Add(BuildChatMessage(role, content));
 
         _currentContent.Clear();
         _text.Append(GetRoleEnd(role));
@@ -245,14 +216,14 @@ public sealed class OpenAIInterpreter : IInterpreter
         var stopSeqs = rule.Stop switch
         {
             LiteralNode lit => new[] { lit.Value },
-            RegexNode => null, // stop_regex not directly supported by OpenAI API
+            RegexNode => null, // stop_regex not directly supported by the Chat Completions API
             _ => null,
         };
 
         return CallCompletion(
             maxTokens: rule.MaxTokens ?? 256,
             temperature: rule.Temperature,
-            stop: stopSeqs,
+            stopSequences: stopSeqs,
             responseFormat: null);
     }
 
@@ -274,57 +245,41 @@ public sealed class OpenAIInterpreter : IInterpreter
         var raw = CallCompletion(
             maxTokens: Math.Max(maxLen, 1),
             temperature: rule.Temperature,
-            stop: null,
+            stopSequences: null,
             responseFormat: null);
 
         // Pick the option that the response best matches (longest prefix match).
-        var best = options
+        return options
             .OrderByDescending(o => o.Length)
             .FirstOrDefault(o => raw.StartsWith(o, StringComparison.OrdinalIgnoreCase))
             ?? options[0];
-
-        return best;
     }
 
     private string ExecuteJson(JsonSchemaNode json, RuleNode rule)
     {
-        object responseFormat;
-
-        if (json.SchemaJson is not null)
-        {
-            var schema = JsonDocument.Parse(json.SchemaJson).RootElement;
-            responseFormat = new
-            {
-                type = "json_schema",
-                json_schema = new
-                {
-                    name = rule.Name,
-                    strict = true,
-                    schema = schema,
-                },
-            };
-        }
-        else
-        {
-            responseFormat = new { type = "json_object" };
-        }
+        var responseFormat = json.SchemaJson is not null
+            ? ChatResponseFormat.CreateJsonSchemaFormat(
+                jsonSchemaFormatName: rule.Name,
+                jsonSchema: BinaryData.FromString(json.SchemaJson),
+                jsonSchemaIsStrict: true)
+            : ChatResponseFormat.CreateJsonObjectFormat();
 
         return CallCompletion(
             maxTokens: rule.MaxTokens ?? 1024,
             temperature: rule.Temperature,
-            stop: null,
+            stopSequences: null,
             responseFormat: responseFormat);
     }
 
     // -----------------------------------------------------------------------
-    // HTTP
+    // SDK call
     // -----------------------------------------------------------------------
 
     private string CallCompletion(
         int? maxTokens,
         float? temperature,
-        string[]? stop,
-        object? responseFormat)
+        string[]? stopSequences,
+        ChatResponseFormat? responseFormat)
     {
         // Build the messages list, including a partial assistant turn if we have
         // any assistant prefix content.
@@ -336,42 +291,21 @@ public sealed class OpenAIInterpreter : IInterpreter
             // assistant message.  OpenAI itself does not support this officially
             // but Anthropic and others do.  We include it here for completeness;
             // it will simply be ignored by providers that don't support it.
-            messages.Add(new ChatMessage("assistant", assistantPrefix));
+            messages.Add(new AssistantChatMessage(assistantPrefix));
         }
 
-        var request = new ChatRequest(
-            Model: _model,
-            Messages: messages,
-            MaxTokens: maxTokens,
-            Temperature: temperature,
-            Stop: stop,
-            ResponseFormat: responseFormat);
+        var chatOptions = new ChatCompletionOptions
+        {
+            MaxOutputTokenCount = maxTokens,
+            Temperature = temperature,
+            ResponseFormat = responseFormat,
+        };
+        if (stopSequences is not null)
+            foreach (var s in stopSequences)
+                chatOptions.StopSequences.Add(s);
 
-        var jsonContent = new StringContent(
-            JsonSerializer.Serialize(request, _jsonOptions),
-            Encoding.UTF8,
-            "application/json");
-
-        // Synchronous HTTP call (mirrors Python's blocking behaviour).
-        var httpResponse = _httpClient
-            .PostAsync($"{_baseUrl}/chat/completions", jsonContent)
-            .GetAwaiter()
-            .GetResult();
-
-        httpResponse.EnsureSuccessStatusCode();
-
-        var responseBody = httpResponse.Content
-            .ReadAsStringAsync()
-            .GetAwaiter()
-            .GetResult();
-
-        var parsed = JsonSerializer.Deserialize<ChatCompletionResponse>(responseBody)
-            ?? throw new InvalidOperationException("OpenAI returned an empty response.");
-
-        if (parsed.Choices.Count == 0)
-            throw new InvalidOperationException("OpenAI returned no choices.");
-
-        return parsed.Choices[0].Message.Content;
+        var result = _chatClient.CompleteChat(messages, chatOptions);
+        return string.Concat(result.Value.Content.Select(p => p.Text));
     }
 
     // -----------------------------------------------------------------------
@@ -381,15 +315,26 @@ public sealed class OpenAIInterpreter : IInterpreter
     // because that is what most OpenAI-compatible APIs use internally.
     // MockInterpreter uses a simpler <|role|> … <|/role|> format that is easier
     // to assert against in unit tests.  Both formats are purely cosmetic: the
-    // actual wire representation sent to the API is always a list of JSON messages.
+    // actual wire representation sent to the API is always a list of SDK messages.
     // -----------------------------------------------------------------------
 
     private static string GetRoleStart(string role) => $"<|im_start|>{role}\n";
     private static string GetRoleEnd(string role) => "\n<|im_end|>\n";
 
     // -----------------------------------------------------------------------
-    // Capture storage
+    // Helpers
     // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Creates the appropriate SDK <see cref="ChatMessage"/> subtype for the given role.
+    /// </summary>
+    private static ChatMessage BuildChatMessage(string role, string content) => role switch
+    {
+        "system" => new SystemChatMessage(content),
+        "user" => new UserChatMessage(content),
+        "assistant" => new AssistantChatMessage(content),
+        _ => new UserChatMessage(content), // fallback for custom roles
+    };
 
     private void StoreCapture(string name, string value, bool listAppend)
     {
