@@ -166,20 +166,10 @@ public sealed class MockInterpreter : IInterpreter
 
     private void StoreCapture(string name, string value, bool listAppend)
     {
-        if (listAppend)
-        {
-            // Store as a list by embedding into the value with a tab separator.
-            // A production implementation would use a proper list data structure;
-            // this keeps CaptureValue simple for the MVP.
-            var existing = _captures.TryGetValue(name, out var prev)
-                ? prev.Value + "\t" + value
-                : value;
-            _captures[name] = new CaptureValue(existing);
-        }
+        if (listAppend && _captures.TryGetValue(name, out var existing))
+            _captures[name] = existing.Append(value);
         else
-        {
             _captures[name] = new CaptureValue(value);
-        }
     }
 }
 

@@ -177,4 +177,36 @@ public class MockModelTests
         Assert.Equal("answer", result["x"]);
         Assert.Contains("answer [done]", result.Text);
     }
+
+    // -----------------------------------------------------------------------
+    // List-append captures
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public void Gen_ListAppend_AccumulatesAllValues()
+    {
+        var lm = MockModel.Create("item");
+
+        // Two separate gen calls with list_append=true on the same name.
+        var rule = GrammarFunctions.Gen("items", listAppend: true);
+        var result = (lm + rule) + rule;
+
+        var capture = result.Captures["items"];
+        Assert.Equal(2, capture.Values.Count);
+        Assert.All(capture.Values, v => Assert.Equal("item", v));
+    }
+
+    [Fact]
+    public void Gen_ListAppend_ValuesWithTabCharacters_AreStoredCorrectly()
+    {
+        // Values containing tabs must not corrupt the list structure.
+        var lm = MockModel.Create("value\twith\ttabs");
+        var rule = GrammarFunctions.Gen("key", listAppend: true);
+
+        var r1 = lm + rule;
+        var r2 = r1 + rule;
+
+        Assert.Equal(2, r2.Captures["key"].Values.Count);
+        Assert.All(r2.Captures["key"].Values, v => Assert.Equal("value\twith\ttabs", v));
+    }
 }

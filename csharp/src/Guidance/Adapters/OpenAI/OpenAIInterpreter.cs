@@ -57,11 +57,30 @@ internal record ChatCompletionResponse(
 /// synchronous behaviour.  A future <c>IAsyncInterpreter</c> interface can
 /// replace this.
 ///
+/// <b>Note on HttpClient lifecycle:</b> A single <see cref="HttpClient"/> instance
+/// is created per public constructor call and is then <em>shared</em> by all clones
+/// of that interpreter (see the private copy constructor).  Do not create a new
+/// <see cref="OpenAIInterpreter"/> per request; instead, create it once via
+/// <see cref="OpenAIModel.Create"/> and reuse the resulting <see cref="Model"/>.
+///
 /// Corresponds to <c>BaseOpenAIInterpreter</c> in
 /// <c>guidance/models/_openai_base.py</c>.
 /// </summary>
 public sealed class OpenAIInterpreter : IInterpreter
 {
+    // Static fields first, then instance fields.
+
+    // JSON serialiser options — shared across all instances.
+    private static readonly JsonSerializerOptions _jsonOptions = new()
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+
+    // -----------------------------------------------------------------------
+    // The HttpClient is shared between an interpreter and all of its clones.
+    // This avoids socket exhaustion: all Model branches that descend from the
+    // same OpenAIModel.Create() call reuse a single socket pool.
+    // -----------------------------------------------------------------------
     private readonly HttpClient _httpClient;
     private readonly string _model;
     private readonly string _baseUrl;
@@ -79,12 +98,6 @@ public sealed class OpenAIInterpreter : IInterpreter
     private readonly Dictionary<string, CaptureValue> _captures;
 
     private string? _activeRole;
-
-    // JSON serialiser options for request/response.
-    private static readonly JsonSerializerOptions _jsonOptions = new()
-    {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    };
 
     /// <summary>
     /// Initialises a new <see cref="OpenAIInterpreter"/>.
@@ -113,6 +126,7 @@ public sealed class OpenAIInterpreter : IInterpreter
     }
 
     // Copy constructor used by Clone().
+    // The HttpClient is intentionally shared (it is thread-safe and reuse is recommended).
     private OpenAIInterpreter(
         HttpClient httpClient,
         string model,
@@ -123,7 +137,7 @@ public sealed class OpenAIInterpreter : IInterpreter
         Dictionary<string, CaptureValue> captures,
         string? activeRole)
     {
-        _httpClient = httpClient;   // HttpClient is thread-safe and can be shared.
+        _httpClient = httpClient;
         _model = model;
         _baseUrl = baseUrl;
         _messages = new List<ChatMessage>(messages);
@@ -361,7 +375,13 @@ public sealed class OpenAIInterpreter : IInterpreter
     }
 
     // -----------------------------------------------------------------------
-    // ChatML helpers (matches Python's get_role_start / get_role_end)
+    // ChatML helpers
+    // -----------------------------------------------------------------------
+    // The text representation uses ChatML format (<|im_start|>role … <|im_end|>)
+    // because that is what most OpenAI-compatible APIs use internally.
+    // MockInterpreter uses a simpler <|role|> … <|/role|> format that is easier
+    // to assert against in unit tests.  Both formats are purely cosmetic: the
+    // actual wire representation sent to the API is always a list of JSON messages.
     // -----------------------------------------------------------------------
 
     private static string GetRoleStart(string role) => $"<|im_start|>{role}\n";
@@ -373,16 +393,9 @@ public sealed class OpenAIInterpreter : IInterpreter
 
     private void StoreCapture(string name, string value, bool listAppend)
     {
-        if (listAppend)
-        {
-            var existing = _captures.TryGetValue(name, out var prev)
-                ? prev.Value + "\t" + value
-                : value;
-            _captures[name] = new CaptureValue(existing);
-        }
+        if (listAppend && _captures.TryGetValue(name, out var existing))
+            _captures[name] = existing.Append(value);
         else
-        {
             _captures[name] = new CaptureValue(value);
-        }
     }
 }
