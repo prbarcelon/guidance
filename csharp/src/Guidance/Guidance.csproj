@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Guidance</RootNamespace>
+    <AssemblyName>Guidance</AssemblyName>
+    <Version>0.2.0</Version>
+    <Description>C# port of the Guidance LLM-steering library.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenAI" Version="2.12.0" />
+  </ItemGroup>
+
+</Project>
