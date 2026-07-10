@@ -1,25 +1,29 @@
-# Guidance — C# Port (MVP)
+# Guidance — C# Port
 
-This directory contains an idiomatic C# MVP port of the [Guidance](https://github.com/guidance-ai/guidance) library.
+This directory contains an idiomatic C# port of the [Guidance](https://github.com/guidance-ai/guidance) library.
 
 ## Scope
 
-This MVP targets **remote-model support** (OpenAI / Azure OpenAI) and provides:
+This port targets **remote-model support** (OpenAI / Azure OpenAI) and provides:
 
 | Feature | Status |
 |---------|--------|
 | Immutable `Model` with copy-on-write semantics | ✅ |
-| Grammar AST (`Gen`, `Select`, `Json`, `Regex`, `Repeat`, …) | ✅ |
+| Full grammar AST (`Gen`, `Select`, `Json`, `Regex`, `Repeat`, `Substring`, `Subgrammar`, `SpecialToken`, …) | ✅ |
 | Role blocks (`WithSystem` / `WithUser` / `WithAssistant`) | ✅ |
 | Capture variables (`model["name"]`) | ✅ |
 | `MockInterpreter` for offline unit-testing | ✅ |
-| OpenAI Chat Completions adapter | ✅ |
+| OpenAI Chat Completions adapter (sync + async) | ✅ |
+| `IAsyncInterpreter` — async-first API (`AppendAsync`, `WithAssistantAsync`, …) | ✅ |
+| `Json<T>()` / `Json(Type)` schema generation via `System.Text.Json` | ✅ |
+| `TokenLimit`, `WithTemperature`, `Capture`, `QuoteRegex` helpers | ✅ |
+| `Substring`, `Subgrammar`, `SpecialToken`, `RuleRefNode`, `LarkNode` grammar nodes | ✅ |
 | Local constrained decoding (llguidance binding) | ❌ future work |
 | Jupyter / notebook visualisation | ❌ future work |
 
 ## Requirements
 
-- .NET 8 SDK or later
+- .NET 9 SDK or later
 - For OpenAI tests: a valid `OPENAI_API_KEY` environment variable
 
 ## Quick start
@@ -236,6 +240,71 @@ GrammarFunctions.OneOrMore(digit)
 
 // Zero or one repetition (optional)
 GrammarFunctions.Optional(digit)
+
+// Exactly N repetitions
+GrammarFunctions.ExactlyNRepeats(digit, nRepeats: 4)
+
+// At most N repetitions (0 to N)
+GrammarFunctions.AtMostNRepeats(digit, nRepeats: 4)
+
+// Alias for Repeat with named arguments
+GrammarFunctions.Sequence(digit, minLength: 1, maxLength: 5)
+```
+
+#### `Substring` — generate a subsequence of a known string
+
+```csharp
+// Allow the model to output any contiguous word-level sub-sequence of the target.
+GrammarFunctions.Substring("quick brown fox", name: "excerpt")
+
+// Character-level chunking
+GrammarFunctions.Substring("abc", chunk: "character", name: "chars")
+```
+
+#### `Subgrammar` — embed a grammar as a self-contained unit
+
+```csharp
+var inner = GrammarFunctions.Gen("inner", regex: @"\d+");
+
+// Wrap as a subgrammar (no capture)
+GrammarFunctions.Subgrammar(inner)
+
+// With capture, token limit and temperature
+GrammarFunctions.Subgrammar(inner, name: "result", maxTokens: 32, temperature: 0.5f)
+
+// With skip-whitespace between tokens
+GrammarFunctions.Subgrammar(inner, skipRegex: @"\s+")
+```
+
+#### `SpecialToken` — insert a special vocabulary token
+
+```csharp
+// Parses "<|endoftext|>" and wraps it in a SpecialTokenNode.
+GrammarFunctions.SpecialToken("<|endoftext|>")
+GrammarFunctions.SpecialToken("<|im_start|>")
+```
+
+#### `TokenLimit` / `WithTemperature` / `Capture` — modifiers
+
+```csharp
+var gen = GrammarFunctions.Gen("x");
+
+// Apply a token budget to an existing rule
+GrammarFunctions.TokenLimit(gen, 64)
+
+// Set / override the sampling temperature
+GrammarFunctions.WithTemperature(gen, 0.7f)
+
+// Attach a capture name to any grammar node
+GrammarFunctions.Capture(new RegexNode(@"\d+"), name: "digits")
+```
+
+#### `QuoteRegex` — escape special regex characters
+
+```csharp
+// Escape "2 + 2" so it can be used literally inside a regex pattern.
+string escaped = GrammarFunctions.QuoteRegex("2 + 2");  // "2\ \+\ 2"
+GrammarFunctions.Gen(regex: escaped + "=4")
 ```
 
 ---
@@ -320,6 +389,55 @@ var result = lm
 Console.WriteLine(result["answer"]); // 4
 ```
 
+#### Async role blocks
+
+All role helpers have `*Async` counterparts that accept
+`Func<Model, CancellationToken, Task<Model>>` callbacks:
+
+```csharp
+var lm = OpenAIModel.Create("gpt-4o", apiKey: "sk-...");
+
+var result = await (await (await lm
+    .WithSystemAsync("You are a helpful assistant."))
+    .WithUserAsync("What is the capital of France?"))
+    .WithAssistantAsync(async (m, ct) =>
+        await m.AppendAsync(GrammarFunctions.Gen("capital", maxTokens: 5), ct));
+
+Console.WriteLine(result["capital"]);
+```
+
+---
+
+### JSON schema generation
+
+`GrammarFunctions.Json<T>()` derives a JSON schema from a .NET type using
+`System.Text.Json.Schema.JsonSchemaExporter` and passes it to the model as
+a structured-output constraint.
+
+```csharp
+public sealed record Person(string Name, int Age);
+
+// Using a generic type parameter
+var rule = GrammarFunctions.Json<Person>(name: "person");
+
+// Using a Type object
+var rule2 = GrammarFunctions.Json(typeof(Person), name: "person");
+
+// With custom JsonSerializerOptions
+var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+var rule3 = GrammarFunctions.Json<Person>(name: "p", options: opts);
+
+// In a model pipeline
+var lm = OpenAIModel.Create("gpt-4o", apiKey: "sk-...");
+var result = lm
+    .WithUser("Describe a person.")
+    .WithAssistant(m => m + GrammarFunctions.Json<Person>("person"));
+
+var json = result["person"];
+var person = JsonSerializer.Deserialize<Person>(json)!;
+Console.WriteLine($"{person.Name}, age {person.Age}");
+```
+
 ---
 
 ### List-append captures
@@ -369,14 +487,15 @@ Console.WriteLine(branch2["color"]);
 Guidance/
 ├── Grammar/
 │   ├── GrammarNode.cs        ← Abstract base + all concrete node types
-│   └── GrammarFunctions.cs   ← Gen(), Select(), Json(), Regex(), …
+│   └── GrammarFunctions.cs   ← Gen(), Select(), Json(), Regex(), Substring(), …
 ├── Models/
 │   ├── CaptureValue.cs       ← Captured variable value + log-prob
-│   ├── IInterpreter.cs       ← Interpreter contract
-│   ├── Model.cs              ← Immutable model (copy-on-write)
-│   └── MockInterpreter.cs    ← Offline stub for unit tests
+│   ├── IInterpreter.cs       ← Synchronous interpreter contract
+│   ├── IAsyncInterpreter.cs  ← Async interpreter contract (extends IInterpreter)
+│   ├── Model.cs              ← Immutable model (copy-on-write, sync + async)
+│   └── MockInterpreter.cs    ← Offline stub for unit tests (implements IAsyncInterpreter)
 └── Adapters/OpenAI/
-    ├── OpenAIInterpreter.cs  ← HTTP adapter calling /v1/chat/completions
+    ├── OpenAIInterpreter.cs  ← HTTP adapter calling /v1/chat/completions (sync + async)
     └── OpenAIModel.cs        ← Convenience factory
 ```
 
@@ -384,13 +503,17 @@ Guidance/
 
 | Python | C# |
 |--------|----|
-| `guidance/_ast.py` — `GrammarNode`, `LiteralNode`, … | `Grammar/GrammarNode.cs` |
-| `guidance/_grammar.py` — `gen()`, `select()`, … | `Grammar/GrammarFunctions.cs` |
+| `guidance/_ast.py` — `GrammarNode`, `LiteralNode`, `SubstringNode`, `SubgrammarNode`, … | `Grammar/GrammarNode.cs` |
+| `guidance/_grammar.py` — `gen()`, `select()`, `token_limit()`, `with_temperature()`, … | `Grammar/GrammarFunctions.cs` |
+| `guidance/library/_gen.py` — `gen()` with `save_stop_text`, `lazy` | `GrammarFunctions.Gen()` |
+| `guidance/library/_json.py` — `json()` with Pydantic schema | `GrammarFunctions.Json<T>()` |
+| `guidance/library/_sequences.py` — `exactly_n_repeats()`, `at_most_n_repeats()`, `sequence()` | `GrammarFunctions.ExactlyNRepeats/AtMostNRepeats/Sequence` |
+| `guidance/library/_substring.py` — `substring()` | `GrammarFunctions.Substring()` |
 | `guidance/models/_base/_model.py` — `Model` | `Models/Model.cs` |
-| `guidance/models/_base/_interpreter.py` — `Interpreter` | `Models/IInterpreter.cs` |
+| `guidance/models/_base/_interpreter.py` — `Interpreter` | `Models/IInterpreter.cs` + `IAsyncInterpreter.cs` |
 | `guidance/models/_mock.py` — `Mock` | `Models/MockInterpreter.cs` |
 | `guidance/models/_openai_base.py` — `BaseOpenAIInterpreter` | `Adapters/OpenAI/OpenAIInterpreter.cs` |
-| `guidance/library/_role.py` — `system()`, `user()`, `assistant()` | `Model.WithSystem/User/Assistant` |
+| `guidance/library/_role.py` — `system()`, `user()`, `assistant()` | `Model.WithSystem/User/Assistant` (sync + async) |
 
 ## Design decisions
 
@@ -409,23 +532,34 @@ Python uses `with system():` context managers backed by `ContextVar`.  C# uses a
 callback API instead, which avoids `AsyncLocal` side-effects and is more readable:
 
 ```csharp
+// Synchronous
 lm = lm.WithSystem("prompt")
        .WithUser("question")
        .WithAssistant(m => m + Gen("answer"));
+
+// Asynchronous
+lm = await (await (await lm
+    .WithSystemAsync("prompt"))
+    .WithUserAsync("question"))
+    .WithAssistantAsync(async (m, ct) => await m.AppendAsync(Gen("answer"), ct));
 ```
 
-### Async / blocking
-The MVP uses synchronous (`GetAwaiter().GetResult()`) blocking for OpenAI HTTP calls.
-This mirrors the Python library's behaviour (which is also synchronous / thread-blocking).
-A future `AppendAsync` / `IAsyncInterpreter` interface can replace this.
+### Async API
+`IAsyncInterpreter` extends `IInterpreter` with `AppendLiteralAsync` and `ApplyRuleAsync`.
+`Model` exposes `AppendAsync`, `WithSystemAsync`, `WithUserAsync`, `WithAssistantAsync`, and
+`WithRoleAsync`.  Both `MockInterpreter` and `OpenAIInterpreter` implement `IAsyncInterpreter`;
+the OpenAI adapter uses `CompleteChatAsync` on the async path to avoid blocking threads.
 
-## Porting gaps (future work)
+### JSON schema generation
+`GrammarFunctions.Json<T>()` and `GrammarFunctions.Json(Type)` use
+`System.Text.Json.Schema.JsonSchemaExporter` (available since .NET 9) to derive a JSON schema
+from any `System.Text.Json`-serialisable .NET type, mirroring the Pydantic-based approach in
+the Python library.
+
+## Remaining gaps (future work)
 
 1. **Local constrained decoding** — requires either a native .NET binding to `llguidance`
    (Rust crate) or a managed re-implementation of the token-mask parser loop.
 2. **Transformers / llama.cpp / ONNX backends** — each needs its own .NET integration.
-3. **Async-first API** — `IAsyncInterpreter` + `Task<Model>` returning methods.
-4. **Pydantic-style schema generation** — use `System.Text.Json.Schema` (available in
-   .NET 9) or a third-party library.
-5. **Notebook / Jupyter visualisation** — the Python `stitch` widget has no .NET
+3. **Notebook / Jupyter visualisation** — the Python `stitch` widget has no .NET
    equivalent; a console or web-based renderer would need to be built from scratch.

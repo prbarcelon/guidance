@@ -8,7 +8,7 @@ using Guidance.Models;
 namespace Guidance.Adapters.OpenAI;
 
 /// <summary>
-/// An <see cref="IInterpreter"/> that calls the OpenAI Chat Completions API
+/// An <see cref="IAsyncInterpreter"/> that calls the OpenAI Chat Completions API
 /// using the official <c>OpenAI</c> .NET SDK to execute grammar rules.
 ///
 /// Supports OpenAI, Azure OpenAI, and any OpenAI API-compatible server
@@ -29,9 +29,9 @@ namespace Guidance.Adapters.OpenAI;
 ///   </description></item>
 /// </list>
 ///
-/// <b>Note on blocking:</b> Completions are requested synchronously via the SDK's
-/// <c>CompleteChat</c> method.  This mirrors the Python library's synchronous
-/// behaviour.  A future <c>IAsyncInterpreter</c> interface can replace this.
+/// <b>Note on blocking:</b> Both synchronous (<see cref="ApplyRule"/>) and
+/// asynchronous (<see cref="ApplyRuleAsync"/>) paths are available.  Prefer the
+/// async path when using <see cref="Model.AppendAsync"/> to avoid blocking threads.
 ///
 /// <b>Note on ChatClient lifecycle:</b> A single <see cref="ChatClient"/> instance
 /// is created per public constructor call and is then <em>shared</em> by all clones
@@ -42,7 +42,7 @@ namespace Guidance.Adapters.OpenAI;
 /// Corresponds to <c>BaseOpenAIInterpreter</c> in
 /// <c>guidance/models/_openai_base.py</c>.
 /// </summary>
-public sealed class OpenAIInterpreter : IInterpreter
+public sealed class OpenAIInterpreter : IAsyncInterpreter
 {
     // -----------------------------------------------------------------------
     // The ChatClient is shared between an interpreter and all of its clones.
@@ -175,17 +175,7 @@ public sealed class OpenAIInterpreter : IInterpreter
             _ => ExecuteGen(rule),
         };
 
-        _currentContent.Append(generated);
-        _text.Append(generated);
-
-        if (rule.Capture is not null)
-            StoreCapture(rule.Capture, generated, rule.ListAppend);
-
-        if (rule.Suffix is not null)
-        {
-            _currentContent.Append(rule.Suffix.Value);
-            _text.Append(rule.Suffix.Value);
-        }
+        CommitGenerated(rule, generated);
     }
 
     /// <inheritdoc/>
@@ -219,7 +209,36 @@ public sealed class OpenAIInterpreter : IInterpreter
     }
 
     // -----------------------------------------------------------------------
-    // Generation helpers
+    // IAsyncInterpreter
+    // -----------------------------------------------------------------------
+
+    /// <inheritdoc/>
+    public Task AppendLiteralAsync(string text, CancellationToken cancellationToken = default)
+    {
+        AppendLiteral(text);
+        return Task.CompletedTask;
+    }
+
+    /// <inheritdoc/>
+    public async Task ApplyRuleAsync(RuleNode rule, CancellationToken cancellationToken = default)
+    {
+        if (_activeRole != "assistant")
+            throw new InvalidOperationException(
+                "OpenAI models can only generate inside an assistant role block " +
+                "(use model.WithAssistantAsync(...)).");
+
+        string generated = rule.Value switch
+        {
+            SelectNode select => await ExecuteSelectAsync(select, rule, cancellationToken),
+            JsonSchemaNode json => await ExecuteJsonAsync(json, rule, cancellationToken),
+            _ => await ExecuteGenAsync(rule, cancellationToken),
+        };
+
+        CommitGenerated(rule, generated);
+    }
+
+    // -----------------------------------------------------------------------
+    // Generation helpers (synchronous)
     // -----------------------------------------------------------------------
 
     private string ExecuteGen(RuleNode rule)
@@ -283,7 +302,98 @@ public sealed class OpenAIInterpreter : IInterpreter
     }
 
     // -----------------------------------------------------------------------
-    // SDK call
+    // Generation helpers (asynchronous)
+    // -----------------------------------------------------------------------
+
+    private async Task<string> ExecuteGenAsync(
+        RuleNode rule,
+        CancellationToken cancellationToken)
+    {
+        var stopSeqs = rule.Stop switch
+        {
+            LiteralNode lit => new[] { lit.Value },
+            RegexNode => null,
+            _ => null,
+        };
+
+        return await CallCompletionAsync(
+            maxTokens: rule.MaxTokens ?? 256,
+            temperature: rule.Temperature,
+            stopSequences: stopSeqs,
+            responseFormat: null,
+            cancellationToken: cancellationToken);
+    }
+
+    private async Task<string> ExecuteSelectAsync(
+        SelectNode select,
+        RuleNode rule,
+        CancellationToken cancellationToken)
+    {
+        var options = select.Options
+            .OfType<LiteralNode>()
+            .Select(l => l.Value)
+            .ToList();
+
+        if (options.Count == 0)
+            throw new InvalidOperationException(
+                "SelectNode must contain at least one LiteralNode option for the OpenAI adapter.");
+
+        var maxLen = options.Max(o => (int)Math.Ceiling(o.Length / 4.0));
+
+        var raw = await CallCompletionAsync(
+            maxTokens: Math.Max(maxLen, 1),
+            temperature: rule.Temperature,
+            stopSequences: null,
+            responseFormat: null,
+            cancellationToken: cancellationToken);
+
+        return options
+            .OrderByDescending(o => o.Length)
+            .FirstOrDefault(o => raw.StartsWith(o, StringComparison.OrdinalIgnoreCase))
+            ?? options[0];
+    }
+
+    private async Task<string> ExecuteJsonAsync(
+        JsonSchemaNode json,
+        RuleNode rule,
+        CancellationToken cancellationToken)
+    {
+        var responseFormat = json.SchemaJson is not null
+            ? ChatResponseFormat.CreateJsonSchemaFormat(
+                jsonSchemaFormatName: rule.Name,
+                jsonSchema: BinaryData.FromString(json.SchemaJson),
+                jsonSchemaIsStrict: true)
+            : ChatResponseFormat.CreateJsonObjectFormat();
+
+        return await CallCompletionAsync(
+            maxTokens: rule.MaxTokens ?? 1024,
+            temperature: rule.Temperature,
+            stopSequences: null,
+            responseFormat: responseFormat,
+            cancellationToken: cancellationToken);
+    }
+
+    // -----------------------------------------------------------------------
+    // Shared commit helper
+    // -----------------------------------------------------------------------
+
+    private void CommitGenerated(RuleNode rule, string generated)
+    {
+        _currentContent.Append(generated);
+        _text.Append(generated);
+
+        if (rule.Capture is not null)
+            StoreCapture(rule.Capture, generated, rule.ListAppend);
+
+        if (rule.Suffix is not null)
+        {
+            _currentContent.Append(rule.Suffix.Value);
+            _text.Append(rule.Suffix.Value);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SDK calls
     // -----------------------------------------------------------------------
 
     private string CallCompletion(
@@ -292,8 +402,27 @@ public sealed class OpenAIInterpreter : IInterpreter
         string[]? stopSequences,
         ChatResponseFormat? responseFormat)
     {
-        // Build the messages list, including a partial assistant turn if we have
-        // any assistant prefix content.
+        var messages = BuildMessages();
+        var chatOptions = BuildOptions(maxTokens, temperature, stopSequences, responseFormat);
+        var result = _chatClient.CompleteChat(messages, chatOptions);
+        return string.Concat(result.Value.Content.Select(p => p.Text));
+    }
+
+    private async Task<string> CallCompletionAsync(
+        int? maxTokens,
+        float? temperature,
+        string[]? stopSequences,
+        ChatResponseFormat? responseFormat,
+        CancellationToken cancellationToken)
+    {
+        var messages = BuildMessages();
+        var chatOptions = BuildOptions(maxTokens, temperature, stopSequences, responseFormat);
+        var result = await _chatClient.CompleteChatAsync(messages, chatOptions, cancellationToken);
+        return string.Concat(result.Value.Content.Select(p => p.Text));
+    }
+
+    private List<ChatMessage> BuildMessages()
+    {
         var messages = new List<ChatMessage>(_messages);
         var assistantPrefix = _currentContent.ToString();
         if (_activeRole == "assistant" && assistantPrefix.Length > 0)
@@ -304,7 +433,15 @@ public sealed class OpenAIInterpreter : IInterpreter
             // it will simply be ignored by providers that don't support it.
             messages.Add(new AssistantChatMessage(assistantPrefix));
         }
+        return messages;
+    }
 
+    private static ChatCompletionOptions BuildOptions(
+        int? maxTokens,
+        float? temperature,
+        string[]? stopSequences,
+        ChatResponseFormat? responseFormat)
+    {
         var chatOptions = new ChatCompletionOptions
         {
             MaxOutputTokenCount = maxTokens,
@@ -314,9 +451,7 @@ public sealed class OpenAIInterpreter : IInterpreter
         if (stopSequences is not null)
             foreach (var s in stopSequences)
                 chatOptions.StopSequences.Add(s);
-
-        var result = _chatClient.CompleteChat(messages, chatOptions);
-        return string.Concat(result.Value.Content.Select(p => p.Text));
+        return chatOptions;
     }
 
     // -----------------------------------------------------------------------

@@ -118,8 +118,50 @@ public sealed class Model
         }
     }
 
+    /// <summary>
+    /// Async version of <see cref="ApplyNodeMutating"/> — uses
+    /// <see cref="IAsyncInterpreter"/> when available, otherwise falls back to
+    /// the synchronous path.
+    /// </summary>
+    private async Task ApplyNodeMutatingAsync(
+        GrammarNode node,
+        CancellationToken cancellationToken)
+    {
+        var asyncInterpreter = _interpreter as IAsyncInterpreter;
+
+        switch (node)
+        {
+            case LiteralNode { IsNull: false } literal:
+                if (asyncInterpreter is not null)
+                    await asyncInterpreter.AppendLiteralAsync(literal.Value, cancellationToken);
+                else
+                    _interpreter.AppendLiteral(literal.Value);
+                break;
+
+            case LiteralNode:
+                break;
+
+            case RuleNode rule:
+                if (asyncInterpreter is not null)
+                    await asyncInterpreter.ApplyRuleAsync(rule, cancellationToken);
+                else
+                    _interpreter.ApplyRule(rule);
+                break;
+
+            case JoinNode join:
+                foreach (var child in join.Children)
+                    await ApplyNodeMutatingAsync(child, cancellationToken);
+                break;
+
+            default:
+                throw new NotSupportedException(
+                    $"Top-level grammar node of type '{node.GetType().Name}' cannot be " +
+                    $"applied directly.  Wrap it with a RuleNode via GrammarFunctions.");
+        }
+    }
+
     // -----------------------------------------------------------------------
-    // Public append operations
+    // Public append operations (synchronous)
     // -----------------------------------------------------------------------
 
     /// <summary>
@@ -143,7 +185,34 @@ public sealed class Model
     public static Model operator +(Model model, string text) => model.Append(text);
 
     // -----------------------------------------------------------------------
-    // Role / block helpers
+    // Public append operations (asynchronous)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Asynchronously returns a new model that has <paramref name="node"/> applied
+    /// to the state.  Uses <see cref="IAsyncInterpreter"/> when available.
+    /// </summary>
+    public async Task<Model> AppendAsync(
+        GrammarNode node,
+        CancellationToken cancellationToken = default)
+    {
+        var m = Copy();
+        await m.ApplyNodeMutatingAsync(node, cancellationToken);
+        return m;
+    }
+
+    /// <summary>
+    /// Asynchronously returns a new model with the string literal appended.
+    /// </summary>
+    public Task<Model> AppendAsync(
+        string text,
+        CancellationToken cancellationToken = default)
+        => string.IsNullOrEmpty(text)
+            ? Task.FromResult(this)
+            : AppendAsync(new LiteralNode(text), cancellationToken);
+
+    // -----------------------------------------------------------------------
+    // Role / block helpers (synchronous)
     // -----------------------------------------------------------------------
 
     /// <summary>
@@ -201,4 +270,92 @@ public sealed class Model
     /// triggering LLM generation.
     /// </summary>
     public Model WithAssistant(Func<Model, Model> configure) => WithRole("assistant", configure);
+
+    // -----------------------------------------------------------------------
+    // Role / block helpers (asynchronous)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Asynchronously runs <paramref name="configure"/> inside a named role block.
+    /// The callback receives the model (with the role already open) and must return
+    /// a <see cref="Task{Model}"/> that completes after all content has been appended.
+    /// </summary>
+    public async Task<Model> WithRoleAsync(
+        string role,
+        Func<Model, CancellationToken, Task<Model>> configure,
+        CancellationToken cancellationToken = default)
+    {
+        var start = Copy();
+        start._interpreter.StartRole(role);
+
+        var result = await configure(start, cancellationToken);
+
+        var final = result.Copy();
+        final._interpreter.EndRole(role);
+        return final;
+    }
+
+    /// <summary>
+    /// Asynchronously adds a system message built by <paramref name="configure"/>.
+    /// </summary>
+    public Task<Model> WithSystemAsync(
+        Func<Model, CancellationToken, Task<Model>> configure,
+        CancellationToken cancellationToken = default)
+        => WithRoleAsync("system", configure, cancellationToken);
+
+    /// <summary>Asynchronously adds a system message with static text content.</summary>
+    public Task<Model> WithSystemAsync(
+        string text,
+        CancellationToken cancellationToken = default)
+        => WithRoleAsync("system",
+            (m, ct) => m.AppendAsync(text, ct),
+            cancellationToken);
+
+    /// <summary>
+    /// Asynchronously adds a user message built by <paramref name="configure"/>.
+    /// </summary>
+    public Task<Model> WithUserAsync(
+        Func<Model, CancellationToken, Task<Model>> configure,
+        CancellationToken cancellationToken = default)
+        => WithRoleAsync("user", configure, cancellationToken);
+
+    /// <summary>Asynchronously adds a user message with static text content.</summary>
+    public Task<Model> WithUserAsync(
+        string text,
+        CancellationToken cancellationToken = default)
+        => WithRoleAsync("user",
+            (m, ct) => m.AppendAsync(text, ct),
+            cancellationToken);
+
+    /// <summary>
+    /// Asynchronously adds an assistant message built by <paramref name="configure"/>,
+    /// potentially triggering LLM generation.
+    /// </summary>
+    public Task<Model> WithAssistantAsync(
+        Func<Model, CancellationToken, Task<Model>> configure,
+        CancellationToken cancellationToken = default)
+        => WithRoleAsync("assistant", configure, cancellationToken);
+
+    /// <summary>Asynchronously adds a static assistant message.</summary>
+    public Task<Model> WithAssistantAsync(
+        string text,
+        CancellationToken cancellationToken = default)
+        => WithRoleAsync("assistant",
+            (m, ct) => m.AppendAsync(text, ct),
+            cancellationToken);
 }
+
+/// <summary>
+/// An immutable model object that wraps an <see cref="IInterpreter"/> and exposes
+/// a fluent API for building prompts and generating text.
+///
+/// <b>Immutability:</b> every operation (<c>Append</c>, <c>WithSystem</c>, …)
+/// returns a <em>new</em> <see cref="Model"/> instance; the original is unchanged.
+/// This allows multiple independent "branches" from the same state:
+/// <code>
+/// var base = lm.WithSystem("You are helpful").WithUser("Hello");
+/// var branch1 = base.WithAssistant(m => m + Gen("a", maxTokens: 10));
+/// var branch2 = base.WithAssistant(m => m + Gen("b", maxTokens: 50));
+/// </code>
+///
+/// Corresponds to <c>Model</c> in <c>guidance/models/_base/_model.py</c>.

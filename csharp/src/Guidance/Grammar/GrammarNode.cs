@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text.RegularExpressions;
 
 namespace Guidance.Grammar;
 
@@ -116,7 +117,7 @@ public sealed record RepeatNode(GrammarNode Value, int Min, int? Max = null) : G
 
 /// <summary>
 /// Constrains model output to valid JSON conforming to an optional JSON schema.
-/// Corresponds to <c>JsonNode</c> in <c>guidance/_ast.py</c>.
+/// Corresponds to <c>JsonSchemaNode</c> in <c>guidance/_ast.py</c>.
 ///
 /// On OpenAI-compatible backends this maps to <c>response_format.type = "json_schema"</c>
 /// (or <c>"json_object"</c> when no schema is provided).
@@ -125,6 +126,81 @@ public sealed record RepeatNode(GrammarNode Value, int Min, int? Max = null) : G
 /// A JSON schema serialised as a string, or <c>null</c> to accept any valid JSON object.
 /// </param>
 public sealed record JsonSchemaNode(string? SchemaJson = null) : GrammarNode;
+
+/// <summary>
+/// Constrains generation to any subsequence (subset of contiguous tokens) of
+/// <see cref="Chunks"/> joined back together.
+///
+/// Corresponds to <c>SubstringNode</c> in <c>guidance/_ast.py</c>.
+/// </summary>
+/// <param name="Chunks">
+/// The ordered sequence of string fragments whose concatenation forms the full
+/// target string.  The model may output any contiguous sub-sequence of these
+/// chunks.
+/// </param>
+public sealed record SubstringNode(ImmutableArray<string> Chunks) : GrammarNode;
+
+/// <summary>
+/// Embeds a nested grammar (a "subgrammar") as a single atomic unit within a
+/// larger grammar, optionally skipping tokens that match <see cref="SkipRegex"/>
+/// between elements.
+///
+/// Corresponds to <c>SubgrammarNode</c> in <c>guidance/_ast.py</c>.
+/// </summary>
+/// <param name="Body">The grammar node that defines the inner grammar.</param>
+/// <param name="SkipRegex">
+/// An optional regex pattern.  Tokens matching this pattern are silently skipped
+/// between elements of the body (e.g. whitespace in a token-level grammar).
+/// </param>
+public sealed record SubgrammarNode(GrammarNode Body, string? SkipRegex = null) : GrammarNode;
+
+/// <summary>
+/// A special (non-text) token from the model's vocabulary, such as
+/// <c>&lt;|endoftext|&gt;</c> or a beginning-of-sequence marker.
+///
+/// Corresponds to <c>SpecialToken</c> in <c>guidance/_ast.py</c>.
+/// </summary>
+/// <param name="TokenText">
+/// The token name as it appears between the angle brackets in the model's vocabulary,
+/// e.g. <c>"endoftext"</c> for <c>&lt;|endoftext|&gt;</c>.
+/// </param>
+public sealed record SpecialTokenNode(string TokenText) : GrammarNode;
+
+/// <summary>
+/// A Lark grammar string that is interpreted directly by the llguidance engine.
+/// Only meaningful with local constrained-decoding backends; on remote (OpenAI)
+/// backends it is treated as unconstrained generation.
+///
+/// Corresponds to <c>LarkNode</c> in <c>guidance/_ast.py</c>.
+/// </summary>
+/// <param name="LarkGrammar">The Lark grammar string.</param>
+public sealed record LarkNode(string LarkGrammar) : GrammarNode;
+
+/// <summary>
+/// A forward reference to a <see cref="RuleNode"/>, enabling recursive grammar
+/// definitions (e.g. a list whose elements may themselves be lists).
+///
+/// The target must be set via <see cref="SetTarget"/> before the grammar is
+/// executed.
+///
+/// Corresponds to <c>RuleRefNode</c> in <c>guidance/_ast.py</c>.
+/// </summary>
+public sealed record RuleRefNode : GrammarNode
+{
+    /// <summary>The rule this reference points to, or <c>null</c> if not yet set.</summary>
+    public RuleNode? Target { get; private set; }
+
+    /// <summary>
+    /// Points this reference at <paramref name="target"/>.
+    /// May only be called once; subsequent calls throw <see cref="InvalidOperationException"/>.
+    /// </summary>
+    public void SetTarget(RuleNode target)
+    {
+        if (Target is not null)
+            throw new InvalidOperationException("RuleRefNode target is already set.");
+        Target = target;
+    }
+}
 
 /// <summary>
 /// A named grammar rule that wraps another node and optionally captures its output,
@@ -153,6 +229,9 @@ public sealed record JsonSchemaNode(string? SchemaJson = null) : GrammarNode;
 /// <param name="StopCapture">
 /// If non-<c>null</c>, the matched stop text is also stored under this name.
 /// </param>
+/// <param name="Lazy">
+/// If <c>true</c>, the rule matches as few tokens as possible (lazy / non-greedy).
+/// </param>
 public sealed record RuleNode(
     string Name,
     GrammarNode Value,
@@ -162,5 +241,6 @@ public sealed record RuleNode(
     int? MaxTokens = null,
     GrammarNode? Stop = null,
     LiteralNode? Suffix = null,
-    string? StopCapture = null
+    string? StopCapture = null,
+    bool Lazy = false
 ) : GrammarNode;

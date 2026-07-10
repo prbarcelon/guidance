@@ -1,4 +1,6 @@
 using System.Collections.Immutable;
+using System.Text.Json;
+using System.Text.Json.Schema;
 
 namespace Guidance.Grammar;
 
@@ -7,7 +9,7 @@ namespace Guidance.Grammar;
 ///
 /// These correspond to the Python guidance library's top-level functions
 /// (<c>gen()</c>, <c>select()</c>, <c>json()</c>, etc.) defined in
-/// <c>guidance/_grammar.py</c> and <c>guidance/library/_gen.py</c>.
+/// <c>guidance/_grammar.py</c> and <c>guidance/library/</c>.
 /// </summary>
 public static class GrammarFunctions
 {
@@ -39,6 +41,13 @@ public static class GrammarFunctions
     /// <param name="listAppend">
     /// When <c>true</c> the capture is appended to a list instead of overwriting.
     /// </param>
+    /// <param name="saveStopText">
+    /// When <c>true</c> the matched stop text is stored as <c>model[name + "_stop_text"]</c>.
+    /// When a non-empty string is given, the matched stop text is stored under that name.
+    /// </param>
+    /// <param name="lazy">
+    /// When <c>true</c>, match as few tokens as possible (non-greedy).
+    /// </param>
     public static RuleNode Gen(
         string? name = null,
         string? regex = null,
@@ -47,7 +56,9 @@ public static class GrammarFunctions
         string? suffix = null,
         float? temperature = null,
         int? maxTokens = null,
-        bool listAppend = false)
+        bool listAppend = false,
+        bool saveStopText = false,
+        bool lazy = false)
     {
         if (stop is not null && stopRegex is not null)
             throw new ArgumentException(
@@ -55,6 +66,10 @@ public static class GrammarFunctions
 
         GrammarNode? stopValue = stop is not null ? new LiteralNode(stop)
             : stopRegex is not null ? new RegexNode(stopRegex)
+            : null;
+
+        string? stopCapture = saveStopText
+            ? (name is not null ? name + "_stop_text" : "gen_stop_text")
             : null;
 
         return new RuleNode(
@@ -65,7 +80,9 @@ public static class GrammarFunctions
             MaxTokens: maxTokens,
             Stop: stopValue,
             Suffix: suffix is not null ? new LiteralNode(suffix) : null,
-            ListAppend: listAppend
+            ListAppend: listAppend,
+            StopCapture: stopCapture,
+            Lazy: lazy
         );
     }
 
@@ -157,6 +174,72 @@ public static class GrammarFunctions
         );
     }
 
+    /// <summary>
+    /// Creates a <see cref="RuleNode"/> that constrains model output to valid JSON
+    /// conforming to the schema inferred from the given .NET <paramref name="type"/>.
+    ///
+    /// Uses <see cref="JsonSchemaExporter"/> (available in .NET 9+) to derive the
+    /// schema, mirroring the Pydantic-based approach in the Python library.
+    /// </summary>
+    /// <param name="type">
+    /// The .NET type whose JSON schema is to be generated.  The type must be
+    /// serialisable by <c>System.Text.Json</c>.
+    /// </param>
+    /// <param name="name">Optional capture name.</param>
+    /// <param name="options">
+    /// Optional <see cref="JsonSerializerOptions"/> used during schema inference.
+    /// When <c>null</c>, <see cref="JsonSerializerOptions.Default"/> is used.
+    /// </param>
+    /// <param name="temperature">Sampling temperature.</param>
+    /// <param name="maxTokens">Maximum tokens to generate.</param>
+    public static RuleNode Json(
+        Type type,
+        string? name = null,
+        JsonSerializerOptions? options = null,
+        float? temperature = null,
+        int? maxTokens = null)
+    {
+        var exporterOptions = new JsonSchemaExporterOptions
+        {
+            TreatNullObliviousAsNonNullable = true,
+        };
+        var schemaNode = JsonSchemaExporter.GetJsonSchemaAsNode(
+            options ?? JsonSerializerOptions.Default,
+            type,
+            exporterOptions);
+        var schemaJson = schemaNode.ToJsonString();
+
+        return new RuleNode(
+            Name: name ?? "json",
+            Value: new JsonSchemaNode(schemaJson),
+            Capture: name,
+            Temperature: temperature,
+            MaxTokens: maxTokens
+        );
+    }
+
+    /// <summary>
+    /// Creates a <see cref="RuleNode"/> that constrains model output to valid JSON
+    /// conforming to the schema inferred from <typeparamref name="T"/>.
+    ///
+    /// Convenience generic overload of <see cref="Json(Type,string?,JsonSerializerOptions?,float?,int?)"/>.
+    /// </summary>
+    /// <typeparam name="T">
+    /// The .NET type whose JSON schema is to be generated.
+    /// </typeparam>
+    /// <param name="name">Optional capture name.</param>
+    /// <param name="options">
+    /// Optional <see cref="JsonSerializerOptions"/> used during schema inference.
+    /// </param>
+    /// <param name="temperature">Sampling temperature.</param>
+    /// <param name="maxTokens">Maximum tokens to generate.</param>
+    public static RuleNode Json<T>(
+        string? name = null,
+        JsonSerializerOptions? options = null,
+        float? temperature = null,
+        int? maxTokens = null)
+        => Json(typeof(T), name, options, temperature, maxTokens);
+
     // -----------------------------------------------------------------------
     // Primitives
     // -----------------------------------------------------------------------
@@ -166,6 +249,89 @@ public static class GrammarFunctions
 
     /// <summary>Creates a <see cref="RegexNode"/> matching a regular expression pattern.</summary>
     public static RegexNode Regex(string pattern) => new(pattern);
+
+    // -----------------------------------------------------------------------
+    // token_limit() / with_temperature()
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Returns a copy of <paramref name="value"/> with <see cref="RuleNode.MaxTokens"/>
+    /// set to <paramref name="maxTokens"/>.
+    ///
+    /// If <paramref name="value"/> is already a <see cref="RuleNode"/>, the existing
+    /// node is cloned with the new token limit.  Otherwise, it is wrapped in a new
+    /// <see cref="RuleNode"/>.
+    ///
+    /// Corresponds to <c>token_limit()</c> in <c>guidance/_grammar.py</c>.
+    /// </summary>
+    public static RuleNode TokenLimit(GrammarNode value, int maxTokens)
+    {
+        if (value is RuleNode rule)
+            return rule with { MaxTokens = maxTokens };
+        return new RuleNode(Name: "token_limit", Value: value, MaxTokens: maxTokens);
+    }
+
+    /// <summary>
+    /// Returns a copy of <paramref name="value"/> with <see cref="RuleNode.Temperature"/>
+    /// set to <paramref name="temperature"/>.
+    ///
+    /// If <paramref name="value"/> is already a <see cref="RuleNode"/>, the existing
+    /// node is cloned with the new temperature.  Otherwise, it is wrapped in a new
+    /// <see cref="RuleNode"/>.
+    ///
+    /// Corresponds to <c>with_temperature()</c> in <c>guidance/_grammar.py</c>.
+    /// </summary>
+    public static RuleNode WithTemperature(GrammarNode value, float temperature)
+    {
+        if (value is RuleNode rule)
+            return rule with { Temperature = temperature };
+        return new RuleNode(Name: "with_temperature", Value: value, Temperature: temperature);
+    }
+
+    // -----------------------------------------------------------------------
+    // capture()
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Wraps <paramref name="value"/> so its generated text is stored under
+    /// <paramref name="name"/>.
+    ///
+    /// If <paramref name="value"/> is a <see cref="RuleNode"/> that has no capture
+    /// yet, the capture name is applied in-place (clone); otherwise a new wrapper
+    /// <see cref="RuleNode"/> is created.
+    ///
+    /// Corresponds to <c>capture()</c> in <c>guidance/_grammar.py</c>.
+    /// </summary>
+    public static RuleNode Capture(
+        GrammarNode value,
+        string name,
+        bool listAppend = false)
+    {
+        if (value is RuleNode rule && rule.Capture is null)
+            return rule with { Capture = name, ListAppend = listAppend };
+        return new RuleNode(
+            Name: "capture",
+            Value: value,
+            Capture: name,
+            ListAppend: listAppend);
+    }
+
+    // -----------------------------------------------------------------------
+    // quote_regex()
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Escapes all regex special characters in <paramref name="value"/> so that
+    /// the result can be used as a literal pattern inside a larger regular expression.
+    ///
+    /// Corresponds to <c>quote_regex()</c> in <c>guidance/_grammar.py</c>.
+    /// </summary>
+    public static string QuoteRegex(string value)
+        => System.Text.RegularExpressions.Regex.Escape(value)
+            // Python's quote_regex only escapes: \ + * ? ^ $ ( ) { } [ ] . | —
+            // System.Text.RegularExpressions.Regex.Escape additionally escapes # and spaces,
+            // which is harmless for our purposes.
+            ;
 
     // -----------------------------------------------------------------------
     // Repeat helpers
@@ -207,4 +373,139 @@ public static class GrammarFunctions
     /// Corresponds to <c>optional()</c>.
     /// </summary>
     public static RuleNode Optional(GrammarNode value) => Repeat(value, 0, 1);
+
+    /// <summary>
+    /// Exactly <paramref name="nRepeats"/> repetitions of <paramref name="value"/>.
+    /// Corresponds to <c>exactly_n_repeats()</c> in <c>guidance/library/_sequences.py</c>.
+    /// </summary>
+    public static RuleNode ExactlyNRepeats(GrammarNode value, int nRepeats)
+        => Repeat(value, nRepeats, nRepeats);
+
+    /// <summary>
+    /// At most <paramref name="nRepeats"/> repetitions of <paramref name="value"/> (zero or more).
+    /// Corresponds to <c>at_most_n_repeats()</c> in <c>guidance/library/_sequences.py</c>.
+    /// </summary>
+    public static RuleNode AtMostNRepeats(GrammarNode value, int nRepeats)
+        => Repeat(value, 0, nRepeats);
+
+    /// <summary>
+    /// Alias for <see cref="Repeat"/> that mirrors the Python
+    /// <c>sequence()</c> helper in <c>guidance/library/_sequences.py</c>.
+    /// </summary>
+    public static RuleNode Sequence(GrammarNode value, int minLength = 0, int? maxLength = null)
+        => Repeat(value, minLength, maxLength);
+
+    // -----------------------------------------------------------------------
+    // subgrammar()
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Wraps <paramref name="body"/> in a <see cref="SubgrammarNode"/> so it is
+    /// treated as a self-contained grammar unit.
+    ///
+    /// Corresponds to <c>subgrammar()</c> in <c>guidance/_grammar.py</c>.
+    /// </summary>
+    /// <param name="body">The inner grammar.</param>
+    /// <param name="name">Optional capture name and rule name.</param>
+    /// <param name="skipRegex">
+    /// Optional regex pattern for tokens to skip between body elements.
+    /// </param>
+    /// <param name="maxTokens">Optional token budget.</param>
+    /// <param name="temperature">Optional sampling temperature.</param>
+    public static RuleNode Subgrammar(
+        GrammarNode body,
+        string? name = null,
+        string? skipRegex = null,
+        int? maxTokens = null,
+        float? temperature = null)
+    {
+        var ruleName = name
+            ?? (body is RuleNode rn ? rn.Name : "subgrammar");
+
+        RuleNode node = new RuleNode(
+            Name: ruleName,
+            Value: new SubgrammarNode(body, skipRegex));
+
+        if (maxTokens is not null)
+            node = TokenLimit(node, maxTokens.Value);
+        if (temperature is not null)
+            node = WithTemperature(node, temperature.Value);
+        if (name is not null)
+            node = Capture(node, name);
+        return node;
+    }
+
+    // -----------------------------------------------------------------------
+    // substring()
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Constrains the model to generate any contiguous sub-sequence of the
+    /// chunks derived from <paramref name="targetString"/>.
+    ///
+    /// Corresponds to <c>substring()</c> in <c>guidance/library/_substring.py</c>.
+    /// </summary>
+    /// <param name="targetString">The full string the model must produce a substring of.</param>
+    /// <param name="chunk">
+    /// <c>"word"</c> (default) — split on word boundaries; <c>"character"</c> — split
+    /// character by character.
+    /// </param>
+    /// <param name="name">Optional capture name.</param>
+    public static RuleNode Substring(
+        string targetString,
+        string chunk = "word",
+        string? name = null)
+    {
+        ImmutableArray<string> chunks = chunk switch
+        {
+            "word" => ChunkOnWord(targetString),
+            "character" => [.. targetString.Select(c => c.ToString())],
+            _ => throw new ArgumentException(
+                "chunk must be \"word\" or \"character\".", nameof(chunk))
+        };
+
+        return new RuleNode(
+            Name: name ?? "substring",
+            Value: new SubstringNode(chunks),
+            Capture: name);
+    }
+
+    // -----------------------------------------------------------------------
+    // special_token()
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Creates a <see cref="SpecialTokenNode"/> from a token string of the form
+    /// <c>&lt;token_name&gt;</c>.
+    ///
+    /// Corresponds to <c>special_token()</c> in <c>guidance/_grammar.py</c>.
+    /// </summary>
+    /// <param name="token">
+    /// A string matching <c>&lt;[^&lt;&gt;]+&gt;</c>, e.g. <c>"&lt;|endoftext|&gt;"</c>.
+    /// </param>
+    public static SpecialTokenNode SpecialToken(string token)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(token, @"^<([^<>]+)>$");
+        if (!match.Success)
+            throw new ArgumentException(
+                "token must be of the form \"<token_name>\", e.g. \"<|endoftext|>\".",
+                nameof(token));
+        return new SpecialTokenNode(match.Groups[1].Value);
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
+
+    // Word-boundary chunking that mirrors Python's chunk_on_word():
+    //   re.findall(r"(\s+|\w+|[^\s\w]+)", text)
+    private static ImmutableArray<string> ChunkOnWord(string text)
+    {
+        var matches = System.Text.RegularExpressions.Regex.Matches(
+            text, @"(\s+|\w+|[^\s\w]+)");
+        var builder = ImmutableArray.CreateBuilder<string>(matches.Count);
+        foreach (System.Text.RegularExpressions.Match m in matches)
+            builder.Add(m.Value);
+        return builder.ToImmutable();
+    }
 }
