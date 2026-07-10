@@ -464,4 +464,41 @@ public class ExtendedGrammarTests
         var rule = GrammarFunctions.Gen(stop: "\n", saveStopText: true);
         Assert.Equal("gen_stop_text", rule.StopCapture);
     }
+
+    // -----------------------------------------------------------------------
+    // GrammarFunctions.Lark
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public void Lark_NoOptions_ReturnsRuleNodeWithLarkNodeBody()
+    {
+        const string grammar = "start: /[a-z]+/";
+        var rule = GrammarFunctions.Lark(grammar);
+
+        Assert.Equal("lark", rule.Name);
+        Assert.Null(rule.Capture);
+        var larkNode = Assert.IsType<LarkNode>(rule.Value);
+        Assert.Equal(grammar, larkNode.LarkGrammar);
+    }
+
+    [Fact]
+    public void Lark_WithName_SetsCapture()
+    {
+        var rule = GrammarFunctions.Lark("start: /\\d+/", name: "digits");
+        Assert.Equal("digits", rule.Capture);
+    }
+
+    [Fact]
+    public void Lark_WithMaxTokens_SetsTokenLimit()
+    {
+        var rule = GrammarFunctions.Lark("start: /\\d+/", maxTokens: 16);
+        Assert.Equal(16, rule.MaxTokens);
+    }
+
+    [Fact]
+    public void Lark_WithTemperature_SetsTemperature()
+    {
+        var rule = GrammarFunctions.Lark("start: /\\d+/", temperature: 0.5f);
+        Assert.Equal(0.5f, rule.Temperature);
+    }
 }

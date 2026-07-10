@@ -471,6 +471,46 @@ public static class GrammarFunctions
     }
 
     // -----------------------------------------------------------------------
+    // lark()
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Creates a <see cref="RuleNode"/> whose body is a raw Lark EBNF grammar string
+    /// interpreted directly by the llguidance engine.
+    ///
+    /// On remote (OpenAI) backends this falls back to unconstrained generation because
+    /// local constrained decoding is not yet supported.  When a local backend is available
+    /// the grammar string is compiled by llguidance and used to constrain token sampling.
+    ///
+    /// Corresponds to <c>lark()</c> in <c>guidance/library/_ebnf.py</c>.
+    /// </summary>
+    /// <param name="larkGrammar">
+    /// A Lark grammar string.  See
+    /// https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md for syntax details.
+    /// </param>
+    /// <param name="name">Optional capture name.</param>
+    /// <param name="temperature">Optional sampling temperature.</param>
+    /// <param name="maxTokens">Optional token budget.</param>
+    public static RuleNode Lark(
+        string larkGrammar,
+        string? name = null,
+        float? temperature = null,
+        int? maxTokens = null)
+    {
+        RuleNode node = new RuleNode(
+            Name: name ?? "lark",
+            Value: new LarkNode(larkGrammar));
+
+        if (temperature is not null)
+            node = WithTemperature(node, temperature.Value);
+        if (maxTokens is not null)
+            node = TokenLimit(node, maxTokens.Value);
+        if (name is not null)
+            node = Capture(node, name);
+        return node;
+    }
+
+    // -----------------------------------------------------------------------
     // special_token()
     // -----------------------------------------------------------------------
 

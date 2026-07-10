@@ -9,7 +9,7 @@ This port targets **remote-model support** (OpenAI / Azure OpenAI) and provides:
 | Feature | Status |
 |---------|--------|
 | Immutable `Model` with copy-on-write semantics | ✅ |
-| Full grammar AST (`Gen`, `Select`, `Json`, `Regex`, `Repeat`, `Substring`, `Subgrammar`, `SpecialToken`, …) | ✅ |
+| Full grammar AST (`Gen`, `Select`, `Json`, `Regex`, `Repeat`, `Substring`, `Subgrammar`, `Lark`, `SpecialToken`, …) | ✅ |
 | Role blocks (`WithSystem` / `WithUser` / `WithAssistant`) | ✅ |
 | Capture variables (`model["name"]`) | ✅ |
 | `MockInterpreter` for offline unit-testing | ✅ |
@@ -152,6 +152,15 @@ GrammarFunctions.Gen("snippet", maxTokens: 50)
 // Append to a list instead of overwriting (see "List-append captures" below)
 GrammarFunctions.Gen("items", listAppend: true)
 
+// Save the matched stop text as model["answer_stop_text"]
+GrammarFunctions.Gen("answer", stop: ".", saveStopText: true)
+
+// Save matched stop text under a custom name
+GrammarFunctions.Gen("answer", stop: ".", saveStopText: "my_stop")
+
+// Non-greedy (lazy) match — stop as soon as stop condition is first met
+GrammarFunctions.Gen("line", stop: "\n", lazy: true)
+
 // Combine parameters freely
 GrammarFunctions.Gen(
     name: "answer",
@@ -284,6 +293,26 @@ GrammarFunctions.SpecialToken("<|endoftext|>")
 GrammarFunctions.SpecialToken("<|im_start|>")
 ```
 
+#### `Lark` — raw EBNF grammar (local backends)
+
+Embeds a [Lark-variant EBNF grammar](https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md)
+that is interpreted by the llguidance engine on local constrained-decoding backends.
+On remote (OpenAI) backends it falls back to unconstrained generation.
+
+```csharp
+// Unconstrained on OpenAI; constrained on local backends
+GrammarFunctions.Lark("start: /[a-z]+/")
+
+// With capture name
+GrammarFunctions.Lark("start: /\\d+/", name: "digits")
+
+// With token limit and temperature
+GrammarFunctions.Lark("start: /\\d+/", name: "n", maxTokens: 10, temperature: 0.0f)
+```
+
+> **Note:** `gbnf_to_lark()` (converts llama.cpp GBNF grammars to Lark syntax) has no C#
+> equivalent yet; it depends on the llguidance native binding and is tracked as future work.
+
 #### `TokenLimit` / `WithTemperature` / `Capture` — modifiers
 
 ```csharp
@@ -297,6 +326,9 @@ GrammarFunctions.WithTemperature(gen, 0.7f)
 
 // Attach a capture name to any grammar node
 GrammarFunctions.Capture(new RegexNode(@"\d+"), name: "digits")
+
+// Append to a list instead of overwriting
+GrammarFunctions.Capture(new RegexNode(@"\d+"), name: "digits", listAppend: true)
 ```
 
 #### `QuoteRegex` — escape special regex characters
@@ -509,6 +541,8 @@ Guidance/
 | `guidance/library/_json.py` — `json()` with Pydantic schema | `GrammarFunctions.Json<T>()` |
 | `guidance/library/_sequences.py` — `exactly_n_repeats()`, `at_most_n_repeats()`, `sequence()` | `GrammarFunctions.ExactlyNRepeats/AtMostNRepeats/Sequence` |
 | `guidance/library/_substring.py` — `substring()` | `GrammarFunctions.Substring()` |
+| `guidance/library/_ebnf.py` — `lark()` | `GrammarFunctions.Lark()` |
+| `guidance/library/_ebnf.py` — `gbnf_to_lark()` | ❌ future work (requires llguidance native binding) |
 | `guidance/models/_base/_model.py` — `Model` | `Models/Model.cs` |
 | `guidance/models/_base/_interpreter.py` — `Interpreter` | `Models/IInterpreter.cs` + `IAsyncInterpreter.cs` |
 | `guidance/models/_mock.py` — `Mock` | `Models/MockInterpreter.cs` |
@@ -559,7 +593,10 @@ the Python library.
 ## Remaining gaps (future work)
 
 1. **Local constrained decoding** — requires either a native .NET binding to `llguidance`
-   (Rust crate) or a managed re-implementation of the token-mask parser loop.
-2. **Transformers / llama.cpp / ONNX backends** — each needs its own .NET integration.
-3. **Notebook / Jupyter visualisation** — the Python `stitch` widget has no .NET
+   (Rust crate) or a managed re-implementation of the token-mask parser loop.  This also
+   unlocks full runtime enforcement of `Lark`-grammar constraints.
+2. **`gbnf_to_lark()`** — converts llama.cpp GBNF grammars to Lark syntax; blocked on the
+   same llguidance native binding.
+3. **Transformers / llama.cpp / ONNX backends** — each needs its own .NET integration.
+4. **Notebook / Jupyter visualisation** — the Python `stitch` widget has no .NET
    equivalent; a console or web-based renderer would need to be built from scratch.
