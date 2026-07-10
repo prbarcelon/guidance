@@ -344,18 +344,3 @@ public sealed class Model
             (m, ct) => m.AppendAsync(text, ct),
             cancellationToken);
 }
-
-/// <summary>
-/// An immutable model object that wraps an <see cref="IInterpreter"/> and exposes
-/// a fluent API for building prompts and generating text.
-///
-/// <b>Immutability:</b> every operation (<c>Append</c>, <c>WithSystem</c>, …)
-/// returns a <em>new</em> <see cref="Model"/> instance; the original is unchanged.
-/// This allows multiple independent "branches" from the same state:
-/// <code>
-/// var base = lm.WithSystem("You are helpful").WithUser("Hello");
-/// var branch1 = base.WithAssistant(m => m + Gen("a", maxTokens: 10));
-/// var branch2 = base.WithAssistant(m => m + Gen("b", maxTokens: 50));
-/// </code>
-///
-/// Corresponds to <c>Model</c> in <c>guidance/models/_base/_model.py</c>.

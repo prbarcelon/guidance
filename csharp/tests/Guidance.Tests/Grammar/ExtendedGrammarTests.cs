@@ -385,8 +385,18 @@ public class ExtendedGrammarTests
     [Fact]
     public void SpecialToken_ValidToken_ParsesTokenText()
     {
+        // For "<|endoftext|>", the content between the outer < > is "|endoftext|"
+        // (the pipe chars are part of the token name, not delimiters).
         var node = GrammarFunctions.SpecialToken("<|endoftext|>");
         Assert.Equal("|endoftext|", node.TokenText);
+    }
+
+    [Fact]
+    public void SpecialToken_PlainToken_ParsesTokenText()
+    {
+        // For a simpler token like "<bos>", the content between < > is "bos".
+        var node = GrammarFunctions.SpecialToken("<bos>");
+        Assert.Equal("bos", node.TokenText);
     }
 
     [Fact]

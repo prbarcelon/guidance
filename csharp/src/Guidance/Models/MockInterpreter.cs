@@ -286,18 +286,3 @@ public static class MockModel
         Model.From(new MockInterpreter(mockResponse));
 }
 
-
-/// <summary>
-/// A lightweight, fully offline interpreter used for unit testing and grammar
-/// validation without requiring a real LLM backend.
-///
-/// For generation rules (<see cref="RuleNode"/>s whose body is a <see cref="RegexNode"/>)
-/// it returns the first prefix of <c>mockResponse</c> that satisfies any regex /
-/// stop constraint, falling back to the whole response string.
-/// For selection rules it picks the first option whose text appears as a prefix
-/// of <c>mockResponse</c>, or simply the first option.
-/// For JSON rules it returns <c>mockResponse</c> unchanged (callers should
-/// supply valid JSON as the mock response when testing JSON grammars).
-///
-/// Corresponds to <c>Mock</c> / <c>MockEngine</c> in
-/// <c>guidance/models/_mock.py</c>.
