@@ -1,8 +1,11 @@
 {
   "version": 2,
-  "dgSpecHash": "QyigpVFZaIQ=",
+  "dgSpecHash": "PEq2dKVIKi4=",
   "success": true,
   "projectFilePath": "/home/runner/work/guidance/guidance/csharp/src/Guidance/Guidance.csproj",
-  "expectedPackageFiles": [],
+  "expectedPackageFiles": [
+    "/tmp/codeql-scratch-92506c9be8c51142/dbs/csharp/working/packages/microsoft.netcore.app.ref/8.0.28/microsoft.netcore.app.ref.8.0.28.nupkg.sha512",
+    "/tmp/codeql-scratch-92506c9be8c51142/dbs/csharp/working/packages/microsoft.aspnetcore.app.ref/8.0.28/microsoft.aspnetcore.app.ref.8.0.28.nupkg.sha512"
+  ],
   "logs": []
 }

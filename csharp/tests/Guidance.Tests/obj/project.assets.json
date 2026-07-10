@@ -882,7 +882,7 @@
     ]
   },
   "packageFolders": {
-    "/home/runner/.nuget/packages/": {}
+    "/tmp/codeql-scratch-92506c9be8c51142/dbs/csharp/working/packages": {}
   },
   "project": {
     "version": "1.0.0",
@@ -890,7 +890,7 @@
       "projectUniqueName": "/home/runner/work/guidance/guidance/csharp/tests/Guidance.Tests/Guidance.Tests.csproj",
       "projectName": "Guidance.Tests",
       "projectPath": "/home/runner/work/guidance/guidance/csharp/tests/Guidance.Tests/Guidance.Tests.csproj",
-      "packagesPath": "/home/runner/.nuget/packages/",
+      "packagesPath": "/tmp/codeql-scratch-92506c9be8c51142/dbs/csharp/working/packages",
       "outputPath": "/home/runner/work/guidance/guidance/csharp/tests/Guidance.Tests/obj/",
       "projectStyle": "PackageReference",
       "configFilePaths": [
@@ -956,6 +956,16 @@
         ],
         "assetTargetFallback": true,
         "warn": true,
+        "downloadDependencies": [
+          {
+            "name": "Microsoft.AspNetCore.App.Ref",
+            "version": "[8.0.28, 8.0.28]"
+          },
+          {
+            "name": "Microsoft.NETCore.App.Ref",
+            "version": "[8.0.28, 8.0.28]"
+          }
+        ],
         "frameworkReferences": {
           "Microsoft.NETCore.App": {
             "privateAssets": "all"
