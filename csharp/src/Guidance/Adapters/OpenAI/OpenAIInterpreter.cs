@@ -66,13 +66,23 @@ public sealed class OpenAIInterpreter : IInterpreter
     private string? _activeRole;
 
     /// <summary>
+    /// A well-known placeholder API key used when no key is required.
+    /// OpenAI API-compatible servers (Ollama, LM Studio, vLLM, etc.) typically
+    /// ignore the Authorization header when running without authentication, so any
+    /// non-empty string satisfies the SDK's credential requirement.
+    /// </summary>
+    private const string NoAuthKeyPlaceholder = "no-key";
+
+    /// <summary>
     /// Initialises a new <see cref="OpenAIInterpreter"/>.
     /// </summary>
-    /// <param name="model">Model name, e.g. <c>"gpt-4o"</c>.</param>
+    /// <param name="model">Model name, e.g. <c>"gpt-4o"</c> or <c>"llama3"</c>.</param>
     /// <param name="apiKey">
     /// API key for authentication.
     /// Pass <c>null</c> or an empty string for OpenAI API-compatible servers
-    /// that do not require a key (e.g. Ollama, LM Studio, vLLM).
+    /// that do not require a key (e.g. Ollama, LM Studio, vLLM running locally).
+    /// In that case the SDK sends <see cref="NoAuthKeyPlaceholder"/> as the bearer token;
+    /// locally-running compatible servers typically ignore the Authorization header.
     /// </param>
     /// <param name="baseUrl">
     /// Base URL of the Chat Completions endpoint.
@@ -90,9 +100,10 @@ public sealed class OpenAIInterpreter : IInterpreter
             Endpoint = new Uri(baseUrl.TrimEnd('/'))
         };
 
-        // Use a placeholder for servers that do not require authentication.
+        // ApiKeyCredential requires a non-null/non-empty value.
+        // For keyless servers, use a well-known placeholder; they ignore the header.
         var credential = new ApiKeyCredential(
-            string.IsNullOrWhiteSpace(apiKey) ? "no-key" : apiKey);
+            string.IsNullOrWhiteSpace(apiKey) ? NoAuthKeyPlaceholder : apiKey);
 
         _chatClient = new ChatClient(model, credential, options);
 
