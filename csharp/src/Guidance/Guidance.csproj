@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Guidance</RootNamespace>
+    <AssemblyName>Guidance</AssemblyName>
+    <Version>0.1.0</Version>
+    <Description>C# port of the Guidance LLM-steering library (MVP: remote-model support).</Description>
+  </PropertyGroup>
+
+</Project>
